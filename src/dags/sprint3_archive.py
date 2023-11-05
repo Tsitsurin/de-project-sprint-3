@@ -59,38 +59,27 @@ def get_report(ti):
         raise TimeoutError()
 
     ti.xcom_push(key='report_id', value=report_id)
+    ti.xcom_push(key='task_id', value=task_id)
     print(f'Report_id={report_id}')
 
 
-def get_increment(date, ti):
-    print('Making request get_increment')
+#def upload_data_to_staging(filename, date, pg_table, pg_schema, ti): 
+def upload_data_to_staging(filename, pg_table, pg_schema, ti): 
+    #increment_id = ti.xcom_pull(key='increment_id')
     report_id = ti.xcom_pull(key='report_id')
-    response = requests.get(
-        f'{base_url}/get_increment?report_id={report_id}&date={str(date)}T00:00:00',
-        headers=headers)
-    response.raise_for_status()
-    print(f'Response is {response.content}')
-
-    increment_id = json.loads(response.content)['data']['increment_id']
-    if not increment_id:
-        raise ValueError(f'Increment is empty. Most probably due to error in API call.')
-    
-    ti.xcom_push(key='increment_id', value=increment_id)
-    print(f'increment_id={increment_id}')
-
-
-def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
-    increment_id = ti.xcom_pull(key='increment_id')
-    s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
+    #s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
+    s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{report_id}/{filename}'
     print(s3_filename)
-    local_filename = date.replace('-', '') + '_' + filename
-    print(local_filename)
+    #local_filename = date.replace('-', '') + '_' + filename
+    #print(local_filename)
     response = requests.get(s3_filename)
     response.raise_for_status()
-    open(f"{local_filename}", "wb").write(response.content)
+    #open(f"{local_filename}", "wb").write(response.content)
+    open(f"{filename}", "wb").write(response.content)
     print(response.content)
 
-    df = pd.read_csv(local_filename)
+    #df = pd.read_csv(local_filename)
+    df = pd.read_csv(filename)
     df=df.drop('id', axis=1)
     df=df.drop_duplicates(subset=['uniq_id'])
 
@@ -99,7 +88,8 @@ def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
 
     postgres_hook = PostgresHook(postgres_conn_id)
     engine = postgres_hook.get_sqlalchemy_engine()
-    row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
+    #row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
+    row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='replace', index=False)
     print(f'{row_count} rows was inserted')
 
 
@@ -111,10 +101,10 @@ args = {
     'retries': 0
 }
 
-business_dt = '{{ ds }}'
+#business_dt = '{{ ds }}'
 
 with DAG(
-        'sales_mart',
+        'sales_mart_archive',
         default_args=args,
         description='Provide default dag for sprint3',
         catchup=True,
@@ -129,16 +119,15 @@ with DAG(
         task_id='get_report',
         python_callable=get_report)
 
-    get_increment = PythonOperator(
-        task_id='get_increment',
-        python_callable=get_increment,
-        op_kwargs={'date': business_dt})
+    delete_user_order_log = PostgresOperator(
+        task_id='delete_user_order_log',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/delete_archive.sql")
 
     upload_user_order_inc = PythonOperator(
         task_id='upload_user_order_inc',
         python_callable=upload_data_to_staging,
-        op_kwargs={'date': business_dt,
-                   'filename': 'user_order_log_inc.csv',
+        op_kwargs={'filename': 'user_order_log.csv',
                    'pg_table': 'user_order_log',
                    'pg_schema': 'staging'})
 
@@ -160,15 +149,15 @@ with DAG(
     update_f_sales = PostgresOperator(
         task_id='update_f_sales',
         postgres_conn_id=postgres_conn_id,
-        sql="sql/mart.f_sales.sql",
-        parameters={"date": {business_dt}}
-    )
+        #sql="sql/mart.f_sales.sql",
+        sql="sql/mart.f_sales_archive.sql")
+        #parameters={"date": {business_dt}}
 
     (
             generate_report
             >> get_report
-            >> get_increment
+            >> delete_user_order_log
             >> upload_user_order_inc
-            >> [update_d_item_table, update_d_city_table, update_d_customer_table]
+            >> [update_d_item_table, update_d_customer_table, update_d_city_table]
             >> update_f_sales
     )
