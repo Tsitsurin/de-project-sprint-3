@@ -23,6 +23,7 @@ headers = {
     'X-Nickname': nickname,
     'X-Cohort': cohort,
     'X-Project': 'True',
+    'IsProject' : 'True',
     'X-API-KEY': api_key,
     'Content-Type': 'application/x-www-form-urlencoded'
 }
@@ -64,7 +65,7 @@ def get_report(ti):
 
 
 #def upload_data_to_staging(filename, date, pg_table, pg_schema, ti): 
-def upload_data_to_staging(filename, pg_table, pg_schema, ti): 
+def upload_data_to_pre_load_staging(filename, pg_table, pg_schema, ti): 
     #increment_id = ti.xcom_pull(key='increment_id')
     report_id = ti.xcom_pull(key='report_id')
     #s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
@@ -89,7 +90,7 @@ def upload_data_to_staging(filename, pg_table, pg_schema, ti):
     postgres_hook = PostgresHook(postgres_conn_id)
     engine = postgres_hook.get_sqlalchemy_engine()
     #row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
-    row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='replace', index=False)
+    row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
     print(f'{row_count} rows was inserted')
 
 
@@ -119,17 +120,22 @@ with DAG(
         task_id='get_report',
         python_callable=get_report)
 
-    delete_user_order_log = PostgresOperator(
-        task_id='delete_user_order_log',
+    delete_pre_load_user_order_log = PostgresOperator(
+        task_id='truncate_pre_load',
         postgres_conn_id=postgres_conn_id,
-        sql="sql/delete_archive.sql")
+        sql="sql/truncate_pre_load.sql")
 
-    upload_user_order_inc = PythonOperator(
-        task_id='upload_user_order_inc',
-        python_callable=upload_data_to_staging,
+    upload_pre_load_user_order = PythonOperator(
+        task_id='upload_pre_load_user_order',
+        python_callable=upload_data_to_pre_load_staging,
         op_kwargs={'filename': 'user_order_log.csv',
-                   'pg_table': 'user_order_log',
+                   'pg_table': 'pre_load_user_order_log',
                    'pg_schema': 'staging'})
+
+    load_user_order_log = PostgresOperator(
+        task_id='load_user_order_log',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/staging.user_order_log.sql")
 
     update_d_item_table = PostgresOperator(
         task_id='update_d_item',
@@ -154,10 +160,11 @@ with DAG(
         #parameters={"date": {business_dt}}
 
     (
-            generate_report
-            >> get_report
-            >> delete_user_order_log
-            >> upload_user_order_inc
+            generate_report 
+            >> get_report 
+            >> delete_pre_load_user_order_log
+            >> upload_pre_load_user_order
+            >> load_user_order_log
             >> [update_d_item_table, update_d_customer_table, update_d_city_table]
             >> update_f_sales
     )

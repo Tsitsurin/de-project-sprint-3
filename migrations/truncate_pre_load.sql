@@ -1,0 +1,1 @@
+truncate table staging.pre_load_user_order_log;

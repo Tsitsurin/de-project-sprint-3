@@ -23,6 +23,7 @@ headers = {
     'X-Nickname': nickname,
     'X-Cohort': cohort,
     'X-Project': 'True',
+    'IsProject' : 'True',
     'X-API-KEY': api_key,
     'Content-Type': 'application/x-www-form-urlencoded'
 }
@@ -79,7 +80,7 @@ def get_increment(date, ti):
     print(f'increment_id={increment_id}')
 
 
-def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
+def upload_pre_load_user_order(filename, date, pg_table, pg_schema, ti):
     increment_id = ti.xcom_pull(key='increment_id')
     s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
     print(s3_filename)
@@ -134,13 +135,23 @@ with DAG(
         python_callable=get_increment,
         op_kwargs={'date': business_dt})
 
-    upload_user_order_inc = PythonOperator(
-        task_id='upload_user_order_inc',
-        python_callable=upload_data_to_staging,
+    delete_pre_load_user_order_log = PostgresOperator(
+        task_id='truncate_pre_load',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/truncate_pre_load.sql")
+
+    upload_pre_load_user_order = PythonOperator(
+        task_id='upload_pre_load_user_order',
+        python_callable=upload_pre_load_user_order,
         op_kwargs={'date': business_dt,
                    'filename': 'user_order_log_inc.csv',
-                   'pg_table': 'user_order_log',
+                   'pg_table': 'pre_load_user_order_log',
                    'pg_schema': 'staging'})
+
+    load_user_order_log = PostgresOperator(
+        task_id='load_user_order_log',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/staging.user_order_log.sql")
 
     update_d_item_table = PostgresOperator(
         task_id='update_d_item',
@@ -161,14 +172,23 @@ with DAG(
         task_id='update_f_sales',
         postgres_conn_id=postgres_conn_id,
         sql="sql/mart.f_sales.sql",
-        parameters={"date": {business_dt}}
-    )
+        parameters={"date": {business_dt}})
+
+    f_customer_retention = PostgresOperator(
+        task_id='f_customer_retention',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/mart.f_customer_retention.sql",
+        parameters={"date": {business_dt}})
 
     (
             generate_report
             >> get_report
             >> get_increment
-            >> upload_user_order_inc
+            >> delete_pre_load_user_order_log
+            >> upload_pre_load_user_order
+            >> load_user_order_log
+            #>> upload_user_order_inc
             >> [update_d_item_table, update_d_city_table, update_d_customer_table]
             >> update_f_sales
+            >> f_customer_retention
     )
